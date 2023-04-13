@@ -22,11 +22,11 @@ impl Decoder for BitcoinCodec {
             return Ok(None);
         }
 
-        let (msg, len) = Message::decode(src)?;
+        let msg = Message::decode(src)?;
 
         if msg.len() == src.len() {
             src.clear();
-        } else if !len.is_empty() {
+        } else if src.has_remaining() {
             src.advance(msg.len());
         }
 

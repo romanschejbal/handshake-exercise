@@ -1,4 +1,5 @@
 use crate::bitcoin::{Checksum, Decode, Encode, Error, Result};
+use bytes::Buf;
 use std::io::Write;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -45,22 +46,19 @@ impl Encode for Message {
 }
 
 impl Decode for Message {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        let (magic, bytes) = u32::decode(bytes)?;
-        let (command, bytes) = Command::decode(bytes)?;
-        let (length, bytes) = u32::decode(bytes)?;
-        let (checksum, bytes) = u32::decode(bytes)?;
-        let (payload, bytes) = Payload::decode_command(command.clone(), bytes)?;
-        Ok((
-            Message {
-                magic,
-                command,
-                length,
-                checksum,
-                payload,
-            },
-            bytes,
-        ))
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        let magic = u32::decode(bytes)?;
+        let command = Command::decode(bytes)?;
+        let length = u32::decode(bytes)?;
+        let checksum = u32::decode(bytes)?;
+        let payload = Payload::decode_command(command.clone(), bytes)?;
+        Ok(Message {
+            magic,
+            command,
+            length,
+            checksum,
+            payload,
+        })
     }
 }
 
@@ -86,11 +84,14 @@ impl Encode for Command {
 }
 
 impl Decode for Command {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        match &bytes[..12] {
-            b"version\0\0\0\0\0" => Ok((Command::Version, &bytes[12..])),
-            b"verack\0\0\0\0\0\0" => Ok((Command::VerAck, &bytes[12..])),
-            b"sendheaders\0" => Ok((Command::SendHeaders, &bytes[12..])),
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        if bytes.remaining() < 12 {
+            return Err(Error::NotEnoughBytes("Command"));
+        }
+        match &bytes.copy_to_bytes(12)[..] {
+            b"version\0\0\0\0\0" => Ok(Command::Version),
+            b"verack\0\0\0\0\0\0" => Ok(Command::VerAck),
+            b"sendheaders\0" => Ok(Command::SendHeaders),
             x => Err(Error::Command(format!(
                 "unhandled command: {:?}",
                 String::from_utf8_lossy(x)
@@ -107,15 +108,15 @@ pub enum Payload {
 }
 
 impl Payload {
-    fn decode_command(command: Command, bytes: &[u8]) -> Result<(Self, &[u8])> {
+    fn decode_command(command: Command, bytes: &mut impl Buf) -> Result<Self> {
         match command {
             Command::Version => {
-                let (version, bytes) = VersionMessage::decode(bytes)?;
-                Ok((Payload::Version(version), bytes))
+                let version = VersionMessage::decode(bytes)?;
+                Ok(Payload::Version(version))
             }
-            Command::VerAck => Ok((Payload::VerAck, bytes)),
-            Command::SendHeaders => Ok((Payload::SendHeaders, bytes)),
-            Command::SendCmpct => Ok((Payload::SendHeaders, bytes)),
+            Command::VerAck => Ok(Payload::VerAck),
+            Command::SendHeaders => Ok(Payload::SendHeaders),
+            Command::SendCmpct => Ok(Payload::SendHeaders),
         }
     }
 }
@@ -159,30 +160,27 @@ impl Encode for VersionMessage {
 }
 
 impl Decode for VersionMessage {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        let (version, bytes) = i32::decode(bytes)?;
-        let (services, bytes) = u64::decode(bytes)?;
-        let (timestamp, bytes) = i64::decode(bytes)?;
-        let (addr_recv, bytes) = Address::decode(bytes)?;
-        let (addr_from, bytes) = Address::decode(bytes)?;
-        let (nonce, bytes) = u64::decode(bytes)?;
-        let (user_agent, bytes) = VariableLengthString::decode(bytes)?;
-        let (start_height, bytes) = i32::decode(bytes)?;
-        let (relay, bytes) = bool::decode(bytes)?;
-        Ok((
-            VersionMessage {
-                version,
-                services,
-                timestamp,
-                addr_recv,
-                addr_from,
-                nonce,
-                user_agent,
-                start_height,
-                relay,
-            },
-            bytes,
-        ))
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        let version = i32::decode(bytes)?;
+        let services = u64::decode(bytes)?;
+        let timestamp = i64::decode(bytes)?;
+        let addr_recv = Address::decode(bytes)?;
+        let addr_from = Address::decode(bytes)?;
+        let nonce = u64::decode(bytes)?;
+        let user_agent = VariableLengthString::decode(bytes)?;
+        let start_height = i32::decode(bytes)?;
+        let relay = bool::decode(bytes)?;
+        Ok(VersionMessage {
+            version,
+            services,
+            timestamp,
+            addr_recv,
+            addr_from,
+            nonce,
+            user_agent,
+            start_height,
+            relay,
+        })
     }
 }
 
@@ -212,20 +210,17 @@ impl<T> Decode for Address<T>
 where
     T: Decode,
 {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        let (time, bytes) = T::decode(bytes)?;
-        let (services, bytes) = u64::decode(bytes)?;
-        let (ip, bytes) = std::net::IpAddr::decode(bytes)?;
-        let (port, bytes) = Port::decode(bytes)?;
-        Ok((
-            Address {
-                time,
-                services,
-                ip,
-                port,
-            },
-            bytes,
-        ))
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        let time = T::decode(bytes)?;
+        let services = u64::decode(bytes)?;
+        let ip = std::net::IpAddr::decode(bytes)?;
+        let port = Port::decode(bytes)?;
+        Ok(Address {
+            time,
+            services,
+            ip,
+            port,
+        })
     }
 }
 
@@ -246,11 +241,11 @@ impl Encode for Port {
 }
 
 impl Decode for Port {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        Ok((
-            Self(u16::from_be_bytes(bytes[..2].try_into()?)),
-            &bytes[2..],
-        ))
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        if bytes.remaining() <= 2 {
+            return Err(Error::NotEnoughBytes("port"));
+        };
+        Ok(Self(bytes.get_u16()))
     }
 }
 
@@ -282,21 +277,24 @@ impl Encode for VariableInt {
 }
 
 impl Decode for VariableInt {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        match bytes[0] {
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        if bytes.remaining() < 1 {
+            return Err(Error::NotEnoughBytes("variable int"));
+        }
+        match bytes.get_u8() {
             0xFD => {
-                let (number, bytes) = u16::decode(&bytes[1..])?;
-                Ok((VariableInt(number as u64), bytes))
+                let number = u16::decode(bytes)?;
+                Ok(VariableInt(number as u64))
             }
             0xFE => {
-                let (number, bytes) = u32::decode(&bytes[1..])?;
-                Ok((VariableInt(number as u64), bytes))
+                let number = u32::decode(bytes)?;
+                Ok(VariableInt(number as u64))
             }
             0xFF => {
-                let (number, bytes) = u64::decode(&bytes[1..])?;
-                Ok((VariableInt(number), bytes))
+                let number = u64::decode(bytes)?;
+                Ok(VariableInt(number))
             }
-            _ => Ok((VariableInt(bytes[0] as u64), &bytes[1..])),
+            x => Ok(VariableInt(x as u64)),
         }
     }
 }
@@ -319,11 +317,13 @@ impl Encode for VariableLengthString {
 }
 
 impl Decode for VariableLengthString {
-    fn decode(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        let (length, bytes) = VariableInt::decode(bytes)?;
-        let str = String::from_utf8_lossy(&bytes[..(length.0 as usize)]).into_owned();
-        let bytes = &bytes[(length.0 as usize)..];
-        Ok((Self(length, str), bytes))
+    fn decode(bytes: &mut impl Buf) -> Result<Self> {
+        let length = VariableInt::decode(bytes)?;
+        if bytes.remaining() < length.0 as usize {
+            return Err(Error::NotEnoughBytes("variable length string"));
+        }
+        let str = String::from_utf8_lossy(&bytes.copy_to_bytes(length.0 as usize)[..]).into_owned();
+        Ok(Self(length, str))
     }
 }
 
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn decode() {
         let message_bin = b"\xf9\xbe\xb4\xd9version\0\0\0\0\0f\0\0\0@e\xe2A\x80\x11\x01\0\t\x04\0\0\0\0\0\0\x0e\xb1$d\0\0\0\0\0\0\0\0\0\0\0\0*\x02\x83\x08\x90\x0cY\0\xb5\x9b\xb5Q\x1c&\x02\xa8\xdb~\t\x04\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0SH\x1f\xe5\xdc6S`\x10/Satoshi:23.0.0/\xe8\xf2\x0b\0\x01\xf9\xbe\xb4\xd9verack\0\0\0\0\0\0\0\0\0\0]\xf6\xe0\xe2";
-        let (message, _) = Message::decode(&mut &message_bin[..]).unwrap();
+        let message = Message::decode(&mut &message_bin[..]).unwrap();
         assert_eq!(
             message,
             Message {
@@ -402,7 +402,7 @@ mod tests {
 
         let encoded = msg.encode(&mut buf).unwrap();
 
-        let decoded = Message::decode(&buf[..encoded]).unwrap().0;
+        let decoded = Message::decode(&mut &buf[..]).unwrap();
 
         assert_eq!(decoded, msg);
     }

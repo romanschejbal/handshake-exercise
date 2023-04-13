@@ -10,4 +10,6 @@ pub enum Error {
     TryFromSlice(#[from] std::array::TryFromSliceError),
     #[error("command error: {0}")]
     Command(String),
+    #[error("not enough bytes to decode: {0}")]
+    NotEnoughBytes(&'static str),
 }
