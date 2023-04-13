@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         } else {
-            println!("Failed");
+            println!("Closed");
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

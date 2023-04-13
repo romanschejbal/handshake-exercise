@@ -1,5 +1,5 @@
 pub use super::{Decode, Encode, Error, Message, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub struct BitcoinCodec;
@@ -8,7 +8,7 @@ impl Encoder<Message> for BitcoinCodec {
     type Error = Error;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<()> {
-        item.encode(&mut dst.writer()).unwrap();
+        item.encode(dst)?;
         Ok(())
     }
 }
@@ -22,12 +22,12 @@ impl Decoder for BitcoinCodec {
             return Ok(None);
         }
 
-        let msg = Message::decode(src)?;
-
-        if msg.len() == src.len() {
+        let Ok(msg) = Message::decode(src) else {
+            println!("Failed to decode bytes: {:?}", src);
+            return Ok(None);
+        };
+        if !src.has_remaining() {
             src.clear();
-        } else if src.has_remaining() {
-            src.advance(msg.len());
         }
 
         Ok(Some(msg))

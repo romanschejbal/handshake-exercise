@@ -1,6 +1,5 @@
 use crate::bitcoin::{Checksum, Decode, Encode, Error, Result};
-use bytes::Buf;
-use std::io::Write;
+use bytes::{Buf, BufMut};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Message {
@@ -28,14 +27,10 @@ impl Message {
     pub fn payload(&self) -> &Payload {
         &self.payload
     }
-
-    pub fn len(&self) -> usize {
-        4 + 12 + 4 + 4 + self.length as usize
-    }
 }
 
 impl Encode for Message {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
         let mut written = self.magic.encode(buffer)?;
         written += self.command.encode(buffer)?;
         written += self.length.encode(buffer)?;
@@ -72,11 +67,14 @@ pub enum Command {
 }
 
 impl Encode for Command {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
+        if buffer.remaining_mut() < 12 {
+            return Err(Error::NotEnoughSpace("Command"));
+        }
         match self {
-            Self::Version => buffer.write_all(b"version\0\0\0\0\0")?,
-            Self::VerAck => buffer.write_all(b"verack\0\0\0\0\0\0")?,
-            Self::SendHeaders => buffer.write_all(b"sendheaders\0")?,
+            Self::Version => buffer.put_slice(b"version\0\0\0\0\0"),
+            Self::VerAck => buffer.put_slice(b"verack\0\0\0\0\0\0"),
+            Self::SendHeaders => buffer.put_slice(b"sendheaders\0"),
             Self::SendCmpct => return Err(Error::Command("unimplemented".to_string())),
         };
         Ok(12)
@@ -122,7 +120,7 @@ impl Payload {
 }
 
 impl Encode for Payload {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
         match self {
             Self::Version(version) => version.encode(buffer),
             Self::VerAck => ().encode(buffer),
@@ -145,7 +143,7 @@ pub struct VersionMessage {
 }
 
 impl Encode for VersionMessage {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
         let mut written = self.version.encode(buffer)?;
         written += self.services.encode(buffer)?;
         written += self.timestamp.encode(buffer)?;
@@ -196,7 +194,7 @@ impl<T> Encode for Address<T>
 where
     T: Encode,
 {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
         let mut bytes = 0;
         bytes += self.time.encode(buffer)?;
         bytes += self.services.encode(buffer)?;
@@ -234,8 +232,11 @@ impl From<u16> for Port {
 }
 
 impl Encode for Port {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
-        buffer.write_all(&self.0.to_be_bytes())?;
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
+        if buffer.remaining_mut() < 2 {
+            return Err(Error::NotEnoughSpace("port"));
+        }
+        buffer.put_u16(self.0);
         Ok(2)
     }
 }
@@ -253,22 +254,25 @@ impl Decode for Port {
 struct VariableInt(u64);
 
 impl Encode for VariableInt {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
+        if buffer.remaining_mut() < 1 {
+            return Err(Error::NotEnoughSpace("variable int"));
+        }
         match self.0 {
             0..=0xFC => {
-                buffer.write_all(&[self.0 as u8])?;
+                buffer.put_u8(self.0 as u8);
                 Ok(1)
             }
             0xFD..=0xFFFF => {
-                buffer.write_all(&[0xFD])?;
+                buffer.put_u8(0xFD);
                 Ok(1 + (self.0 as u16).encode(buffer)?)
             }
             0x10000..=0xFFFFFFFF => {
-                buffer.write_all(&[0xFE])?;
+                buffer.put_u8(0xFE);
                 Ok(1 + (self.0 as u32).encode(buffer)?)
             }
             _ => {
-                buffer.write_all(&[0xFE])?;
+                buffer.put_u8(0xFE);
                 self.0.encode(buffer)?;
                 Ok(1 + self.0.encode(buffer)?)
             }
@@ -309,9 +313,12 @@ impl From<&str> for VariableLengthString {
 }
 
 impl Encode for VariableLengthString {
-    fn encode(&self, buffer: &mut impl Write) -> Result<usize> {
+    fn encode(&self, buffer: &mut impl BufMut) -> Result<usize> {
         let written = self.0.encode(buffer)?;
-        buffer.write_all(self.1.as_bytes())?;
+        if buffer.remaining_mut() < self.1.len() {
+            return Err(Error::NotEnoughSpace("variable length string"));
+        }
+        buffer.put_slice(self.1.as_bytes());
         Ok(written + self.1.len())
     }
 }
@@ -331,6 +338,42 @@ impl Decode for VariableLengthString {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn encode() {
+        let message_bin = b"\xf9\xbe\xb4\xd9version\0\0\0\0\0f\0\0\0@e\xe2A\x80\x11\x01\0\t\x04\0\0\0\0\0\0\x0e\xb1$d\0\0\0\0\0\0\0\0\0\0\0\0*\x02\x83\x08\x90\x0cY\0\xb5\x9b\xb5Q\x1c&\x02\xa8\xdb~\t\x04\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0SH\x1f\xe5\xdc6S`\x10/Satoshi:23.0.0/\xe8\xf2\x0b\0\x01";
+        let message = Message {
+            magic: 3652501241,
+            command: Command::Version,
+            length: 102,
+            checksum: 1105356096,
+            payload: Payload::Version(VersionMessage {
+                version: 70016,
+                services: 1033,
+                timestamp: 1680126222,
+                addr_recv: Address {
+                    time: (),
+                    services: 0,
+                    ip: "2a02:8308:900c:5900:b59b:b551:1c26:2a8".parse().unwrap(),
+                    port: Port(56190),
+                },
+                addr_from: Address {
+                    time: (),
+                    services: 1033,
+                    ip: "::".parse().unwrap(),
+                    port: Port(0),
+                },
+                nonce: 6940951773072803923,
+                user_agent: "/Satoshi:23.0.0/".into(),
+                start_height: 783080,
+                relay: true,
+            }),
+        };
+
+        let mut buffer = bytes::BytesMut::with_capacity(message_bin.len()).to_vec();
+        message.encode(&mut buffer).unwrap();
+        assert_eq!(buffer, message_bin);
+    }
 
     #[test]
     fn decode() {
@@ -400,7 +443,7 @@ mod tests {
 
         let mut buf = vec![];
 
-        let encoded = msg.encode(&mut buf).unwrap();
+        let _ = msg.encode(&mut buf).unwrap();
 
         let decoded = Message::decode(&mut &buf[..]).unwrap();
 
